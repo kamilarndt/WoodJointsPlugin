@@ -9,6 +9,7 @@ namespace WoodJointsPlugin.Models.Joints
         public MortiseAndTenon(Brep firstSolid, Brep secondSolid, Brep[] intersection)
             : base(firstSolid, secondSolid, intersection)
         {
+            // Initialize any additional properties specific to MortiseAndTenon
             RhinoApp.WriteLine("MortiseAndTenon joint created");
         }
 
@@ -16,114 +17,79 @@ namespace WoodJointsPlugin.Models.Joints
         {
             try
             {
-                RhinoApp.WriteLine("Generating MortiseAndTenon joint...");
-                
-                // Validate inputs
-                if (!FirstSolid.IsValid || !SecondSolid.IsValid)
-                {
-                    RhinoApp.WriteLine("Invalid input breps");
-                    return (FirstSolid, SecondSolid);
-                }
-                
-                if (!FirstSolid.IsSolid || !SecondSolid.IsSolid)
-                {
-                    RhinoApp.WriteLine("Input breps are not solids");
-                    // Continue anyway as this might still work
-                }
-                
-                // For T-shaped connections (as in the provided image), 
-                // special handling is needed to determine orientation
-                bool isVertical = DetectIfVerticalJoint();
-                RhinoApp.WriteLine($"Detected vertical joint orientation: {isVertical}");
-                
-                // 1. Determine joint orientation based on intersection
+                // 1. Determine joint orientation
                 var jointPlane = GetJointPlane();
-                if (isVertical)
+                RhinoApp.WriteLine("Mortise and tenon joint plane origin: " + jointPlane.Origin.ToString());
+
+                // 2. Calculate joint dimensions based on intersection percent
+                var bbox = Intersection[0].GetBoundingBox(true);
+                double percent = Parameters.IntersectionPercent / 100.0;
+
+                // Tenon width is percent of intersection width (X axis)
+                double intersectionWidth = bbox.Max.X - bbox.Min.X;
+                double tenonWidth = intersectionWidth * percent;
+                double tenonDepth = bbox.Max.Y - bbox.Min.Y;
+                double tenonHeight = bbox.Max.Z - bbox.Min.Z;
+
+                double minX, maxX;
+                if (Parameters.PositionMode == TenonPositionMode.Centered)
                 {
-                    // Adjust for vertical joints (e.g., T-shaped connections)
-                    RhinoApp.WriteLine("Adjusting plane for vertical T-shaped connection");
-                    jointPlane = AdjustPlaneForVerticalJoint(jointPlane);
+                    double centerX = (bbox.Min.X + bbox.Max.X) / 2.0;
+                    minX = centerX - tenonWidth / 2.0;
+                    maxX = centerX + tenonWidth / 2.0;
                 }
-                
-                RhinoApp.WriteLine($"Joint plane origin: {jointPlane.Origin}, X: {jointPlane.XAxis}, Y: {jointPlane.YAxis}, Z: {jointPlane.ZAxis}");
-                
-                // 2. Calculate joint dimensions
-                double width = Parameters.Width;
-                double depth = Parameters.Depth;
+                else // Edge
+                {
+                    minX = bbox.Min.X;
+                    maxX = bbox.Min.X + tenonWidth;
+                }
+
+                // Clearance for mortise
                 double clearance = Parameters.Clearance;
-                double extension = GetJointExtension() * 0.8; // 80% of the joint dimension
-                RhinoApp.WriteLine($"Joint dimensions: width={width}, depth={depth}, clearance={clearance}, extension={extension}");
-                
-                // 3. Create tenon geometry
-                RhinoApp.WriteLine("Creating tenon geometry...");
-                var tenonInterval1 = new Interval(-width/2, width/2);
-                var tenonInterval2 = new Interval(-depth/2, depth/2);
-                var tenonInterval3 = new Interval(-clearance/2, extension);
-                
-                RhinoApp.WriteLine($"Tenon intervals: [{tenonInterval1.Min}, {tenonInterval1.Max}], [{tenonInterval2.Min}, {tenonInterval2.Max}], [{tenonInterval3.Min}, {tenonInterval3.Max}]");
-                
-                var tenonBox = new Box(jointPlane, tenonInterval1, tenonInterval2, tenonInterval3);
-                if (!tenonBox.IsValid)
+
+                // Tenon box
+                var tenonBox = new BoundingBox(
+                    new Point3d(minX, bbox.Min.Y, bbox.Min.Z),
+                    new Point3d(maxX, bbox.Max.Y, bbox.Max.Z)
+                );
+                Brep tenonBrep = Brep.CreateFromBox(tenonBox);
+                if (tenonBrep == null)
                 {
-                    RhinoApp.WriteLine("Failed to create valid tenon box");
+                    RhinoApp.WriteLine("Failed to create tenon geometry");
                     return (FirstSolid, SecondSolid);
                 }
-                
-                var tenonBrep = tenonBox.ToBrep();
-                if (tenonBrep == null || !tenonBrep.IsValid)
+
+                // Mortise box (slightly larger for clearance)
+                var mortiseBox = new BoundingBox(
+                    new Point3d(minX - clearance/2, bbox.Min.Y - clearance/2, bbox.Min.Z - clearance/2),
+                    new Point3d(maxX + clearance/2, bbox.Max.Y + clearance/2, bbox.Max.Z + clearance/2)
+                );
+                Brep mortiseBrep = Brep.CreateFromBox(mortiseBox);
+                if (mortiseBrep == null)
                 {
-                    RhinoApp.WriteLine("Failed to create valid tenon brep");
+                    RhinoApp.WriteLine("Failed to create mortise geometry");
                     return (FirstSolid, SecondSolid);
                 }
-                
-                // 4. Create mortise geometry (slightly larger than tenon for clearance)
-                RhinoApp.WriteLine("Creating mortise geometry...");
-                var mortiseInterval1 = new Interval(-width/2 - clearance, width/2 + clearance);
-                var mortiseInterval2 = new Interval(-depth/2 - clearance, depth/2 + clearance);
-                var mortiseInterval3 = new Interval(-extension, clearance/2);
-                
-                RhinoApp.WriteLine($"Mortise intervals: [{mortiseInterval1.Min}, {mortiseInterval1.Max}], [{mortiseInterval2.Min}, {mortiseInterval2.Max}], [{mortiseInterval3.Min}, {mortiseInterval3.Max}]");
-                
-                var mortiseBox = new Box(jointPlane, mortiseInterval1, mortiseInterval2, mortiseInterval3);
-                if (!mortiseBox.IsValid)
-                {
-                    RhinoApp.WriteLine("Failed to create valid mortise box");
-                    return (FirstSolid, SecondSolid);
-                }
-                
-                var mortiseBrep = mortiseBox.ToBrep();
-                if (mortiseBrep == null || !mortiseBrep.IsValid)
-                {
-                    RhinoApp.WriteLine("Failed to create valid mortise brep");
-                    return (FirstSolid, SecondSolid);
-                }
-                
-                // 5. Apply boolean operations
-                RhinoApp.WriteLine("Performing boolean operations...");
-                
-                // Use a small tolerance value suitable for millimeters
+
+                // 3. Boolean operations
+                RhinoApp.WriteLine("Performing boolean operations for mortise and tenon joint...");
                 double tolerance = RhinoDoc.ActiveDoc.ModelAbsoluteTolerance;
-                RhinoApp.WriteLine($"Using tolerance: {tolerance}");
-                
-                RhinoApp.WriteLine("Creating mortise (boolean difference)...");
+
                 Brep[] mortiseResult = Brep.CreateBooleanDifference(FirstSolid, mortiseBrep, tolerance);
-                
                 if (mortiseResult == null || mortiseResult.Length == 0)
                 {
-                    RhinoApp.WriteLine("Failed to create mortise - boolean difference operation failed");
+                    RhinoApp.WriteLine("Failed to create mortise");
                     return (FirstSolid, SecondSolid);
                 }
-                
-                RhinoApp.WriteLine("Creating tenon (boolean intersection)...");
+
                 Brep[] tenonResult = Brep.CreateBooleanIntersection(SecondSolid, tenonBrep, tolerance);
-                
                 if (tenonResult == null || tenonResult.Length == 0)
                 {
-                    RhinoApp.WriteLine("Failed to create tenon - boolean intersection operation failed");
+                    RhinoApp.WriteLine("Failed to create tenon");
                     return (FirstSolid, SecondSolid);
                 }
-                
-                RhinoApp.WriteLine("Joint creation successful");
+
+                RhinoApp.WriteLine("Mortise and tenon joint creation successful");
                 return (mortiseResult[0], tenonResult[0]);
             }
             catch (Exception ex)
@@ -133,78 +99,151 @@ namespace WoodJointsPlugin.Models.Joints
                 return (FirstSolid, SecondSolid);
             }
         }
-        
-        // Helper method to detect if this is a vertical T-shaped joint
-        private bool DetectIfVerticalJoint()
+
+        private Brep CreateTenonGeometry(Plane plane, double width, double depth, double height)
         {
             try
             {
-                // Get bounding boxes in world coordinates
-                var firstBBox = FirstSolid.GetBoundingBox(true);
-                var secondBBox = SecondSolid.GetBoundingBox(true);
-                
-                // Calculate height differences
-                double firstHeight = firstBBox.Max.Z - firstBBox.Min.Z;
-                double secondHeight = secondBBox.Max.Z - secondBBox.Min.Z;
-                
-                // If one piece is much taller than the other, it might be a vertical joint
-                double heightRatio = Math.Max(firstHeight, secondHeight) / Math.Min(firstHeight, secondHeight);
-                bool heightDifferenceSignificant = heightRatio > 2.0;
-                
-                RhinoApp.WriteLine($"Height analysis - First: {firstHeight}, Second: {secondHeight}, Ratio: {heightRatio}");
-                
-                // Also check if one is significantly above the other
-                bool verticalOverlap = 
-                    (firstBBox.Max.Z > secondBBox.Max.Z && firstBBox.Min.Z < secondBBox.Min.Z) ||
-                    (secondBBox.Max.Z > firstBBox.Max.Z && secondBBox.Min.Z < firstBBox.Min.Z);
-                
-                return heightDifferenceSignificant || verticalOverlap;
+                // Create points for the tenon shape (rectangular)
+                var points = new System.Collections.Generic.List<Point3d>
+                {
+                    plane.PointAt(-width/2, -depth/2, 0),
+                    plane.PointAt(width/2, -depth/2, 0),
+                    plane.PointAt(width/2, depth/2, 0),
+                    plane.PointAt(-width/2, depth/2, 0),
+                    plane.PointAt(-width/2, -depth/2, height),
+                    plane.PointAt(width/2, -depth/2, height),
+                    plane.PointAt(width/2, depth/2, height),
+                    plane.PointAt(-width/2, depth/2, height)
+                };
+
+                // Create faces for the tenon
+                var faces = new System.Collections.Generic.List<Brep>();
+
+                // Bottom face
+                var bottomFace = Brep.CreateFromCornerPoints(
+                    points[0], points[1], points[2], points[3], 0.01);
+                if (bottomFace != null) faces.Add(bottomFace);
+
+                // Top face
+                var topFace = Brep.CreateFromCornerPoints(
+                    points[4], points[5], points[6], points[7], 0.01);
+                if (topFace != null) faces.Add(topFace);
+
+                // Side faces
+                var side1 = Brep.CreateFromCornerPoints(
+                    points[0], points[3], points[7], points[4], 0.01);
+                if (side1 != null) faces.Add(side1);
+
+                var side2 = Brep.CreateFromCornerPoints(
+                    points[1], points[5], points[6], points[2], 0.01);
+                if (side2 != null) faces.Add(side2);
+
+                // Front and back faces
+                var front = Brep.CreateFromCornerPoints(
+                    points[0], points[4], points[5], points[1], 0.01);
+                if (front != null) faces.Add(front);
+
+                var back = Brep.CreateFromCornerPoints(
+                    points[3], points[2], points[6], points[7], 0.01);
+                if (back != null) faces.Add(back);
+
+                if (faces.Count < 6)
+                {
+                    RhinoApp.WriteLine($"Failed to create some tenon faces: only {faces.Count}/6 created");
+                    return null;
+                }
+
+                // Join all faces into a single solid
+                var joinedBreps = Brep.JoinBreps(faces, 0.01);
+                if (joinedBreps == null || joinedBreps.Length == 0)
+                {
+                    RhinoApp.WriteLine("Failed to join tenon faces");
+                    return null;
+                }
+
+                return joinedBreps[0];
             }
             catch (Exception ex)
             {
-                RhinoApp.WriteLine($"Error in DetectIfVerticalJoint: {ex.Message}");
-                return false;
+                RhinoApp.WriteLine($"Error in CreateTenonGeometry: {ex.Message}");
+                RhinoApp.WriteLine($"Stack trace: {ex.StackTrace}");
+                return null;
             }
         }
-        
-        // Adjust the joint plane for vertical T-connections
-        private Plane AdjustPlaneForVerticalJoint(Plane originalPlane)
+
+        // Generate the tenon geometry on the local plane of the intersection (prostopadły do powierzchni poziomego elementu)
+        public Brep GenerateTenonOnLocalPlane()
         {
             try
             {
-                var plane = originalPlane.Clone();
-                
-                // For T-shaped connections, the plane needs to be oriented 
-                // so that the Z-axis points along the vertical piece
-                
-                // First check which piece is likely the vertical one
-                var firstBBox = FirstSolid.GetBoundingBox(true);
-                var secondBBox = SecondSolid.GetBoundingBox(true);
-                
-                double firstHeight = firstBBox.Max.Z - firstBBox.Min.Z;
-                double secondHeight = secondBBox.Max.Z - secondBBox.Min.Z;
-                
-                bool firstIsVertical = firstHeight > secondHeight;
-                
-                if (firstIsVertical)
+                var bbox = Intersection[0].GetBoundingBox(true);
+                double percent = Parameters.IntersectionPercent / 100.0;
+                double intersectionWidth = bbox.Max.X - bbox.Min.X;
+                double tenonWidth = intersectionWidth * percent;
+                double tenonDepth = bbox.Max.Y - bbox.Min.Y;
+                double tenonHeight = bbox.Max.Z - bbox.Min.Z;
+
+                // Center of intersection
+                var center = bbox.Center;
+
+                // Find closest face of SecondSolid to center
+                BrepFace closestFace = null;
+                double minDist = double.MaxValue;
+                double closestU = 0, closestV = 0;
+                foreach (var face in SecondSolid.Faces)
                 {
-                    // The mortise will be in the horizontal piece (second)
-                    // Rotate to match Z-axis with the tall piece
-                    plane.Rotate(Math.PI/2, plane.XAxis);
+                    double u, v;
+                    if (!face.ClosestPoint(center, out u, out v))
+                        continue;
+                    var pt = face.PointAt(u, v);
+                    double dist = pt.DistanceTo(center);
+                    if (dist < minDist)
+                    {
+                        minDist = dist;
+                        closestFace = face;
+                        closestU = u;
+                        closestV = v;
+                    }
                 }
-                else
+                if (closestFace == null)
                 {
-                    // The mortise will be in the horizontal piece (first)
-                    // Rotate to match Z-axis with the tall piece
-                    plane.Rotate(Math.PI/2, plane.XAxis);
+                    RhinoApp.WriteLine("Nie znaleziono najbliższej powierzchni do intersection center");
+                    return null;
                 }
-                
-                return plane;
+                // Normal at closest point
+                var normal = closestFace.NormalAt(closestU, closestV);
+                normal.Unitize();
+                // Build local plane (origin=center, normal=face normal)
+                Plane tenonPlane = new Plane(center, normal);
+
+                // Tenon width/height/depth logic as in GenerateJoint
+                double minX, maxX;
+                if (Parameters.PositionMode == TenonPositionMode.Centered)
+                {
+                    double centerX = (bbox.Min.X + bbox.Max.X) / 2.0;
+                    minX = centerX - tenonWidth / 2.0;
+                    maxX = centerX + tenonWidth / 2.0;
+                }
+                else // Edge
+                {
+                    minX = bbox.Min.X;
+                    maxX = bbox.Min.X + tenonWidth;
+                }
+                // For simplicity, create the box at the origin of tenonPlane
+                Brep tenonBrep = CreateTenonGeometry(tenonPlane, tenonWidth, tenonDepth, tenonHeight);
+                if (tenonBrep == null)
+                {
+                    RhinoApp.WriteLine("Failed to create tenon geometry on local plane");
+                    return null;
+                }
+                return tenonBrep;
             }
             catch (Exception ex)
             {
-                RhinoApp.WriteLine($"Error in AdjustPlaneForVerticalJoint: {ex.Message}");
-                return originalPlane;
+                RhinoApp.WriteLine($"Error in GenerateTenonOnLocalPlane: {ex.Message}");
+                RhinoApp.WriteLine($"Stack trace: {ex.StackTrace}");
+                return null;
             }
         }
     }
