@@ -78,42 +78,25 @@ namespace WoodJointsPlugin.Commands
                 doc.Views.Redraw();
                 RhinoApp.WriteLine("Added intersection to document for debugging");
 
-                // 3. Select joint type
-                var panel = new JointSelectionPanel();
-                var jointTypeStr = panel.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow);
-                if (string.IsNullOrEmpty(jointTypeStr))
+                // 3. Use the enhanced dialog to select joint type and adjust parameters
+                var enhancedDialog = new EnhancedJointSelectionDialog();
+                var dialogResult = enhancedDialog.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow);
+                if (dialogResult == null)
                 {
                     RhinoApp.WriteLine("Anulowano wybór typu po³¹czenia.");
                     return Result.Cancel;
                 }
-                RhinoApp.WriteLine($"Wybrano typ po³¹czenia: {jointTypeStr}");
 
-                // Convert string to JointType
-                JointType jointType = JointType.MortiseAndTenon;
-                foreach (JointType type in System.Enum.GetValues(typeof(JointType)))
-                {
-                    if (type.ToDisplayString() == jointTypeStr)
-                    {
-                        jointType = type;
-                        break;
-                    }
-                }
+                // Extract all parameters from the result
+                JointType jointType = dialogResult.JointType;
+                double width = dialogResult.Width;
+                double depth = dialogResult.Depth;
+                double clearance = dialogResult.Clearance;
+                double tailAngle = dialogResult.TailAngle;
 
-                // 4. Get joint parameters
-                var paramDialog = new JointParameterDialog(jointType);
-                var paramResult = paramDialog.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow);
-                if (paramResult == null)
-                {
-                    RhinoApp.WriteLine("Anulowano ustawianie parametrów po³¹czenia.");
-                    return Result.Cancel;
-                }
-
-                // Extract parameters
-                var width = paramResult.Value.width;
-                var depth = paramResult.Value.depth;
-                var clearance = paramResult.Value.clearance;
-
-                RhinoApp.WriteLine($"Parametry: szerokoœæ={width} mm, g³êbokoœæ={depth} mm, luz={clearance} mm");
+                RhinoApp.WriteLine($"Wybrano typ po³¹czenia: {jointType.ToDisplayString()}");
+                RhinoApp.WriteLine($"Parametry: szerokoœæ={width:0.0} mm, g³êbokoœæ={depth:0.0} mm, luz={clearance:0.00} mm" +
+                                   (jointType == JointType.Dovetail ? $", k¹t={tailAngle:0.0}°" : ""));
 
                 // 5. Create appropriate joint object
                 BaseJoint joint = null;
@@ -149,9 +132,9 @@ namespace WoodJointsPlugin.Commands
 
                     // 7. Generate joint
                     RhinoApp.WriteLine("Generowanie geometrii po³¹czenia...");
-                    var result = joint.GenerateJoint();
-                    var modifiedFirst = result.Item1;
-                    var modifiedSecond = result.Item2;
+                    var jointResult = joint.GenerateJoint(); // Renamed variable to avoid conflict
+                    var modifiedFirst = jointResult.Item1;
+                    var modifiedSecond = jointResult.Item2;
 
                     // 8. Update document
                     if (modifiedFirst != null && modifiedSecond != null)
@@ -159,7 +142,7 @@ namespace WoodJointsPlugin.Commands
                         doc.Objects.Replace(objRefs[0].ObjectId, modifiedFirst);
                         doc.Objects.Replace(objRefs[1].ObjectId, modifiedSecond);
                         doc.Views.Redraw();
-                        RhinoApp.WriteLine($"Wygenerowano po³¹czenie typu {jointTypeStr}!");
+                        RhinoApp.WriteLine($"Wygenerowano po³¹czenie typu {jointType.ToDisplayString()}!");
                         return Result.Success;
                     }
                     else
